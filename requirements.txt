@@ -1,10 +1,9 @@
 pdfplumber==0.10.3
 openpyxl==3.1.2
-# Pillow==10.1.0  # Required by pdfplumber
+Pillow==10.1.0  # Required by pdfplumber
 # cryptography==41.0.7  # Sometimes needed
 openpyxl
 easyocr==1.7.0
 pdf2image
-Pillow
 numpy
 PyMuPDF
