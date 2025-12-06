@@ -163,7 +163,7 @@ def extract_contributions_from_text(text):
 def main():
     # Instructions
     st.markdown("""
-    <div style='background-color: #e8f4fd; padding: 15px; border-radius: 10px; margin: 10px 0;'>
+    <div style='background-color: #e8f4fd; padding: 15px; border-radius: 10px; margin: 10px 0; color:black;'>
     <h4>📋 How to use:</h4>
     <ol>
     <li>Upload a Texas Ethics Commission PDF (text-based or scanned)</li>
