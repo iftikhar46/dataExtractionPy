@@ -1,289 +1,422 @@
 import streamlit as st
+import pdfplumber
 import pandas as pd
 import re
 import io
 from datetime import datetime
-import numpy as np
 
-# Set page config
+# Set page configuration
 st.set_page_config(
     page_title="Texas Ethics PDF Extractor",
     page_icon="📄",
     layout="wide"
 )
 
-# Try imports with error handling
-try:
-    import pdfplumber
-    PDFPLUMBER_AVAILABLE = True
-except ImportError as e:
-    PDFPLUMBER_AVAILABLE = False
-    st.error(f"pdfplumber import failed: {e}")
+# Custom CSS for better styling
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1E3A8A;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .sub-header {
+        font-size: 1.5rem;
+        color: #374151;
+        margin-bottom: 1rem;
+    }
+    .success-box {
+        background-color: #D1FAE5;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 5px solid #10B981;
+        margin: 1rem 0;
+    }
+    .info-box {
+        background-color: #DBEAFE;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 5px solid #3B82F6;
+        margin: 1rem 0;
+        color: black;
+    }
+    .stButton>button {
+        background-color: #3B82F6;
+        color: white;
+        font-weight: bold;
+        border: none;
+        padding: 0.5rem 2rem;
+        border-radius: 0.5rem;
+    }
+    .stButton>button:hover {
+        background-color: #2563EB;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-try:
-    import easyocr
-    EASYOCR_AVAILABLE = True
-    # Monkey patch to fix ANTIALIAS issue if needed
-    try:
-        from PIL import Image
-        if not hasattr(Image, 'ANTIALIAS'):
-            Image.ANTIALIAS = Image.Resampling.LANCZOS
-    except:
-        pass
-except ImportError as e:
-    EASYOCR_AVAILABLE = False
-    st.error(f"EasyOCR import failed: {e}")
+# Define footer patterns that should never be captured as data
+FOOTER_PATTERNS = [
+    "provided by Texas Ethics Commission",
+    "www.ethics.state.tx.us",
+    "Version V1.1",
+    "Forms provided by",
+    "Texas Ethics Commission"
+]
 
-st.title("📄 Texas Ethics PDF Extractor")
-st.markdown("Extract Schedule A1 data from Texas Ethics Commission PDFs")
+# Define header patterns that should be skipped
+HEADER_PATTERNS = [
+    "Full name of contributor",
+    "out-of-state PAC",
+    "ID#:_________________________",
+    "Amount of Contribution ($)",
+    "Date",
+    "Contributor address",
+    "Principal occupation",
+    "Job title",
+    "See Instructions",
+    "Employer",
+    "SCHEDULE",
+    "MONETARY POLITICAL CONTRIBUTIONS"
+]
 
-def extract_text_from_scanned_pdf(pdf_bytes):
-    """Extract text from scanned PDFs using a different approach"""
-    try:
-        # First try: Use pdfplumber to extract any text
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            text = ""
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-            
-            if text and len(text.strip()) > 50:
-                return text, "pdfplumber"
-        
-        # If no text found, try a simpler OCR approach
-        # We'll use pytesseract which is more reliable for this
-        try:
-            import pytesseract
-            from pdf2image import convert_from_bytes
-            
-            # Convert PDF to images
-            images = convert_from_bytes(pdf_bytes, dpi=200)
-            
-            all_text = ""
-            for i, image in enumerate(images):
-                # Extract text using pytesseract
-                page_text = pytesseract.image_to_string(image, lang='eng')
-                all_text += page_text + "\n\n"
-            
-            if all_text.strip():
-                return all_text, "pytesseract"
-        except ImportError:
-            st.warning("For better OCR, install: pip install pytesseract pdf2image")
-        except Exception as e:
-            st.warning(f"Tesseract OCR failed: {e}")
-        
-        return None, None
-        
-    except Exception as e:
-        st.error(f"PDF processing error: {str(e)}")
-        return None, None
-
-def extract_text_from_pdf_simple(pdf_bytes):
-    """Simple text extraction without complex OCR"""
-    try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            text = ""
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-            return text if text.strip() else None
-    except Exception as e:
-        st.error(f"Error reading PDF: {str(e)}")
-        return None
-
-def extract_contributions(text):
-    """Extract contribution data from text"""
+def is_footer_text(text):
+    """Check if text contains footer patterns"""
     if not text:
-        return []
+        return False
+    text_lower = text.lower()
+    for pattern in FOOTER_PATTERNS:
+        if pattern.lower() in text_lower:
+            return True
+    return False
+
+def is_header_text(text):
+    """Check if text contains header patterns"""
+    if not text:
+        return False
+    for pattern in HEADER_PATTERNS:
+        if pattern in text:
+            return True
+    return False
+
+def should_skip_line(text):
+    """Determine if a line should be skipped when looking for occupation/employer"""
+    if not text or text.strip() == "":
+        return True
+    if is_footer_text(text):
+        return True
+    if is_header_text(text):
+        return True
+    if re.match(r'^\d+\.\d+$', text):  # Page numbers like "1.0"
+        return True
+    if re.match(r'^Sch:.*Rpt:', text):  # "Sch: 1/5 Rpt: 4/23"
+        return True
+    if re.match(r'^\d+ of \d+$', text):  # "3 of 23"
+        return True
+    return False
+
+def extract_schedule_a1_from_pdf(pdf_file):
+    """Extract Schedule A1 data from uploaded PDF"""
+    all_contributions = []
     
-    contributions = []
-    
-    # Clean the text
-    text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces/newlines
-    
-    # Pattern 1: Date Name Amount pattern
-    # Look for: "06/30/2021 John Doe $1,000.00"
-    pattern1 = r'(\d{2}/\d{2}/\d{4})\s+([^$]+?)\s+\$([\d,]+\.\d{2})'
-    matches1 = re.findall(pattern1, text)
-    
-    for date, name, amount in matches1:
-        # Clean name
-        name = re.sub(r'[^\w\s\.,&()-]', ' ', name).strip()
-        name = re.sub(r'\s+', ' ', name)
-        
-        # Look for address after the amount
-        address = "Not found"
-        # Simple search for city/state pattern after the match
-        address_match = re.search(r'([A-Za-z\s]+,\s*[A-Z]{2}\s+\d{5})', text[text.find(amount)+len(amount):text.find(amount)+len(amount)+200])
-        if address_match:
-            address = address_match.group(1)
-        
-        contributions.append({
-            'Date': date,
-            'Contributor Name': name[:100],
-            'Address': address,
-            'Amount': f"${amount}"
-        })
-    
-    # Pattern 2: More flexible pattern for OCR text
-    if not contributions:
-        # Look for date and amount separately
-        dates = re.findall(r'(\d{2}/\d{2}/\d{4})', text)
-        amounts = re.findall(r'\$([\d,]+\.\d{2})', text)
-        
-        # Pair them up if we found both
-        for i in range(min(len(dates), len(amounts))):
-            # Try to find name between date and amount
-            date = dates[i]
-            amount = f"${amounts[i]}"
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            # Find Schedule A1 pages
+            schedule_a1_pages = []
+            for page_num in range(len(pdf.pages)):
+                page = pdf.pages[page_num]
+                text = page.extract_text()
+                if text and "MONETARY POLITICAL CONTRIBUTIONS" in text:
+                    schedule_a1_pages.append(page_num)
             
-            # Find text between date and amount
-            date_pos = text.find(date)
-            amount_pos = text.find(amount)
+            if not schedule_a1_pages:
+                return None, "No Schedule A1 data found in the PDF"
             
-            if date_pos < amount_pos:
-                name_text = text[date_pos + len(date):amount_pos].strip()
-                name = re.sub(r'[^\w\s\.,&()-]', ' ', name_text).strip()
-                name = re.sub(r'\s+', ' ', name)
+            # Process each Schedule A1 page
+            for page_num in schedule_a1_pages:
+                page = pdf.pages[page_num]
+                text = page.extract_text()
                 
-                if name and len(name) > 2:
-                    contributions.append({
-                        'Date': date,
-                        'Contributor Name': name[:100],
-                        'Address': "Not found",
-                        'Amount': amount
-                    })
-    
-    return contributions
+                # Split into lines and clean
+                lines = [line.strip() for line in text.split('\n') if line.strip()]
+                
+                # Process each contribution
+                i = 0
+                while i < len(lines):
+                    line = lines[i]
+                    
+                    # Check if this line has the pattern: date, name, amount
+                    date_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(.+?)\s+\$([\d,]+\.\d{2})', line)
+                    
+                    if date_match:
+                        date = date_match.group(1)
+                        name_and_maybe_more = date_match.group(2)
+                        amount = f"${date_match.group(3)}"
+                        
+                        # Extract just the name
+                        name = name_and_maybe_more
+                        name = re.sub(r'\(ID#:.*?\)', '', name).strip()
+                        
+                        # Initialize variables
+                        address = "No Data"
+                        city = "No Data"
+                        state = "No Data"
+                        zipcode = "No Data"
+                        occupation = "No Data"
+                        employer = "No Data"
+                        
+                        # Look for address in next 3 lines
+                        for j in range(1, 4):
+                            if i + j < len(lines):
+                                test_line = lines[i + j]
+                                # Check for address pattern (City, ST ZIP)
+                                if ',' in test_line and re.search(r'[A-Z]{2}\s+\d', test_line):
+                                    address = test_line
+                                    
+                                    # Parse address
+                                    addr_parts = address.split(',')
+                                    if len(addr_parts) >= 2:
+                                        city = addr_parts[0].strip()
+                                        state_zip = addr_parts[1].strip()
+                                        sz_parts = state_zip.split()
+                                        if len(sz_parts) >= 2:
+                                            state = sz_parts[0]
+                                            zipcode = sz_parts[1]
+                                    break
+                        
+                        # Find occupation and employer
+                        search_end = min(i + 15, len(lines))
+                        
+                        # Look for next contribution to know where to stop
+                        next_contribution_idx = -1
+                        for j in range(i + 1, min(i + 20, len(lines))):
+                            if re.search(r'\d{2}/\d{2}/\d{4}\s+.*?\$[\d,]+\.\d{2}', lines[j]):
+                                next_contribution_idx = j
+                                search_end = min(search_end, next_contribution_idx)
+                                break
+                        
+                        # Search for occupation/employer
+                        potential_data_lines = []
+                        for j in range(i + 1, search_end):
+                            test_line = lines[j]
+                            
+                            if should_skip_line(test_line):
+                                continue
+                            if test_line == address:
+                                continue
+                            if re.search(r'\d{2}/\d{2}/\d{4}', test_line) and '$' in test_line:
+                                continue
+                            if ',' in test_line and re.search(r'[A-Z]{2}\s+\d', test_line):
+                                continue
+                            
+                            potential_data_lines.append(test_line)
+                        
+                        # Process potential data lines
+                        if potential_data_lines:
+                            if len(potential_data_lines) == 1:
+                                data_line = potential_data_lines[0]
+                                if ' ' in data_line:
+                                    parts = data_line.split(maxsplit=1)
+                                    if len(parts) == 2:
+                                        occupation = parts[0]
+                                        employer = parts[1]
+                                else:
+                                    occupation = data_line
+                            elif len(potential_data_lines) >= 2:
+                                occupation = potential_data_lines[0]
+                                employer = potential_data_lines[1]
+                        
+                        # Final cleanup
+                        for pattern in HEADER_PATTERNS:
+                            if occupation:
+                                occupation = occupation.replace(pattern, "").strip()
+                            if employer:
+                                employer = employer.replace(pattern, "").strip()
+                        
+                        if occupation and occupation in ["()", "(", ")"]:
+                            occupation = "No Data"
+                        if employer and employer in ["()", "(", ")"]:
+                            employer = "No Data"
+                        
+                        if not occupation or not occupation.strip():
+                            occupation = "No Data"
+                        if not employer or not employer.strip():
+                            employer = "No Data"
+                        
+                        all_contributions.append({
+                            'Date': date,
+                            'Contributor Name': name,
+                            'Address': address,
+                            'City': city,
+                            'State': state,
+                            'Zip': zipcode,
+                            'Occupation': occupation,
+                            'Employer': employer,
+                            'Amount': amount,
+                            'Page': page_num + 1
+                        })
+                        
+                        # Skip ahead
+                        skip_amount = 5
+                        for j in range(i + 1, min(i + 10, len(lines))):
+                            if re.search(r'\d{2}/\d{2}/\d{4}\s+.*?\$[\d,]+\.\d{2}', lines[j]):
+                                skip_amount = j - i
+                                break
+                        
+                        i += skip_amount
+                    else:
+                        i += 1
+        
+        # Remove duplicates
+        unique_contributions = []
+        seen = set()
+        for contrib in all_contributions:
+            key = (contrib['Date'], contrib['Contributor Name'], contrib['Amount'])
+            if key not in seen:
+                seen.add(key)
+                unique_contributions.append(contrib)
+        
+        return unique_contributions, None
+        
+    except Exception as e:
+        return None, f"Error processing PDF: {str(e)}"
 
 def main():
-    # Check for PDF processing capability
-    if not PDFPLUMBER_AVAILABLE:
-        st.error("""
-        ❌ Required package not installed!
-        
-        Please make sure `pdfplumber` is in your requirements.txt:
-        ```
-        pdfplumber==0.10.3
-        ```
-        """)
-        return
+    # Header
+    st.markdown('<h1 class="main-header">📄 Texas Ethics Commission PDF Extractor</h1>', unsafe_allow_html=True)
     
+    # Description
     st.markdown("""
-    <div style='background-color: #e8f4fd; padding: 15px; border-radius: 10px; margin: 10px 0;'>
-    <h4>📋 Supported PDF Types:</h4>
-    <ul>
-    <li><strong>Digital PDFs</strong> (text-based) - Best results</li>
-    <li><strong>Scanned PDFs</strong> - May require manual cleanup</li>
-    </ul>
-    <p><em>For scanned PDFs, ensure text is clear and readable.</em></p>
+    <div class="info-box">
+    <strong>ℹ️ About this tool:</strong> This application extracts Schedule A1 (Monetary Political Contributions) 
+    data from Texas Ethics Commission PDF files and exports it to Excel format.
     </div>
     """, unsafe_allow_html=True)
     
-    uploaded_file = st.file_uploader("Upload Texas Ethics Commission PDF", type="pdf")
+    # File upload section
+    st.markdown('<h3 class="sub-header">📤 Upload PDF File</h3>', unsafe_allow_html=True)
     
-    if uploaded_file:
-        # File info
+    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf", label_visibility="collapsed")
+    
+    if uploaded_file is not None:
+        # Show file info
         col1, col2 = st.columns(2)
         with col1:
             st.info(f"**File:** {uploaded_file.name}")
         with col2:
-            st.info(f"**Size:** {uploaded_file.size / 1024:.1f} KB")
+            st.info(f"**Size:** {uploaded_file.size / 1024:.2f} KB")
         
-        if st.button("🔍 Extract Data", type="primary", use_container_width=True):
-            with st.spinner("Processing PDF..."):
-                pdf_bytes = uploaded_file.read()
+        # Process button
+        if st.button("🚀 Extract Data", type="primary"):
+            with st.spinner("Processing PDF... This may take a few seconds."):
+                # Extract data
+                contributions, error = extract_schedule_a1_from_pdf(uploaded_file)
                 
-                # Try simple extraction first
-                text = extract_text_from_pdf_simple(pdf_bytes)
-                
-                if not text:
-                    st.warning("⚠️ Could not extract text. The file might be scanned or encrypted.")
-                    
-                    # Offer alternative
-                    if st.checkbox("Try advanced OCR (experimental)"):
-                        with st.spinner("Trying OCR..."):
-                            ocr_text, method = extract_text_from_scanned_pdf(pdf_bytes)
-                            if ocr_text:
-                                text = ocr_text
-                                st.info(f"Used {method} for text extraction")
-                            else:
-                                st.error("OCR failed. Please upload a text-based PDF.")
-                                return
-                    else:
-                        return
-                
-                # Show extracted text sample
-                with st.expander("🔍 View extracted text sample"):
-                    st.text_area("", text[:2000], height=200)
-                
-                # Extract contributions
-                contributions = extract_contributions(text)
-                
-                if not contributions:
-                    st.warning("""
-                    ⚠️ No Schedule A1 data found.
-                    
-                    **Possible reasons:**
-                    1. PDF doesn't contain Schedule A1
-                    2. Text extraction failed
-                    3. File is scanned with poor quality
-                    
-                    **Try:**
-                    - Uploading a different file
-                    - Using a text-based (not scanned) PDF
-                    - Checking the text sample above
-                    """)
+                if error:
+                    st.error(f"❌ {error}")
+                elif not contributions:
+                    st.warning("⚠️ No Schedule A1 data found in the uploaded PDF.")
                 else:
                     # Create DataFrame
                     df = pd.DataFrame(contributions)
                     
-                    # Clean and sort
-                    try:
-                        df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%Y', errors='coerce')
-                        df = df.sort_values('Date')
-                    except:
-                        pass
+                    # Sort by date and page
+                    df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%Y', errors='coerce')
+                    df = df.sort_values(['Date', 'Page'])
+                    df = df.drop('Page', axis=1)
                     
-                    df = df.drop_duplicates()
+                    # Display success message
+                    st.markdown(f"""
+                    <div class="success-box">
+                    <strong>✅ Success!</strong> Extracted <strong>{len(df)} contributions</strong> from the PDF.
+                    </div>
+                    """, unsafe_allow_html=True)
                     
-                    # Display results
-                    st.success(f"✅ Found {len(df)} contributions")
+                    # Display preview
+                    st.markdown('<h3 class="sub-header">📋 Data Preview</h3>', unsafe_allow_html=True)
+                    st.dataframe(df.head(10), use_container_width=True)
                     
-                    # Preview
-                    st.subheader("📊 Data Preview")
-                    st.dataframe(df.head(20), use_container_width=True)
+                    # Calculate total
+                    total = 0
+                    for amt in df['Amount']:
+                        clean_amt = str(amt).replace('$', '').replace(',', '')
+                        try:
+                            total += float(clean_amt)
+                        except:
+                            pass
                     
-                    # Download
-                    st.subheader("📥 Download")
-                    
-                    col1, col2 = st.columns(2)
-                    
+                    # Display stats
+                    col1, col2, col3 = st.columns(3)
                     with col1:
-                        output = io.BytesIO()
-                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                            df.to_excel(writer, index=False, sheet_name='Contributions')
-                        output.seek(0)
-                        
-                        st.download_button(
-                            label="💾 Download Excel",
-                            data=output,
-                            file_name="contributions.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True
-                        )
-                    
+                        st.metric("Total Contributions", len(df))
                     with col2:
-                        csv = df.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            label="📄 Download CSV",
-                            data=csv,
-                            file_name="contributions.csv",
-                            mime="text/csv",
-                            use_container_width=True
-                        )
+                        st.metric("Total Amount", f"${total:,.2f}")
+                    with col3:
+                        date_range = f"{df['Date'].min().strftime('%m/%d/%Y')} to {df['Date'].max().strftime('%m/%d/%Y')}"
+                        st.metric("Date Range", date_range)
+                    
+                    # Prepare Excel file for download
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        df.to_excel(writer, index=False, sheet_name='Schedule_A1')
+                    
+                    output.seek(0)
+                    
+                    # Download button
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"Schedule_A1_Data_{timestamp}.xlsx"
+                    
+                    st.download_button(
+                        label="📥 Download Excel File",
+                        data=output,
+                        file_name=filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    
+                    # Also show CSV option
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Download CSV File",
+                        data=csv,
+                        file_name=f"Schedule_A1_Data_{timestamp}.csv",
+                        mime="text/csv"
+                    )
+    
+    # Instructions sidebar
+    with st.sidebar:
+        st.markdown("## 📖 Instructions")
+        st.markdown("""
+        1. **Upload** a Texas Ethics Commission PDF file
+        2. **Click** the 'Extract Data' button
+        3. **Preview** the extracted data
+        4. **Download** as Excel or CSV
+        
+        ---
+        
+        **📊 Extracted Fields:**
+        - Date
+        - Contributor Name
+        - Address (with City, State, ZIP)
+        - Occupation
+        - Employer
+        - Amount
+        
+        ---
+        
+        **✅ Supported Format:**
+        Texas Ethics Commission Schedule A1
+        (Monetary Political Contributions)
+        
+        ---
+        
+        **⚠️ Note:**
+        Only extracts data from pages containing
+        "MONETARY POLITICAL CONTRIBUTIONS"
+        """)
+        
+        # Add a reset button
+        if st.button("🔄 Clear & Upload New"):
+            st.rerun()
 
 if __name__ == "__main__":
     main()
