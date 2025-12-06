@@ -2,3 +2,7 @@ pdfplumber==0.10.3
 openpyxl==3.1.2
 # Pillow==10.1.0  # Required by pdfplumber
 # cryptography==41.0.7  # Sometimes needed
+# openpyxl==3.1.2
+easyocr==1.7.0
+pdf2image==1.16.3
+# Pillow==10.1.0
