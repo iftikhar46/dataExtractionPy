@@ -4,44 +4,152 @@ import pandas as pd
 import re
 import io
 from datetime import datetime
-# NEW IMPORTS
 import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image
 
-# ... [Keep your set_page_config and CSS styles exactly as they are] ...
+# Set page configuration
+st.set_page_config(
+    page_title="Texas Ethics PDF Extractor (OCR Supported)",
+    page_icon="📄",
+    layout="wide"
+)
 
-# ... [Keep your FOOTER_PATTERNS and HEADER_PATTERNS exactly as they are] ...
+# Custom CSS for better styling
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1E3A8A;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .sub-header {
+        font-size: 1.5rem;
+        color: #374151;
+        margin-bottom: 1rem;
+    }
+    .success-box {
+        background-color: #D1FAE5;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 5px solid #10B981;
+        margin: 1rem 0;
+    }
+    .info-box {
+        background-color: #DBEAFE;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 5px solid #3B82F6;
+        margin: 1rem 0;
+        color: black;
+    }
+    .stButton>button {
+        background-color: #3B82F6;
+        color: white;
+        font-weight: bold;
+        border: none;
+        padding: 0.5rem 2rem;
+        border-radius: 0.5rem;
+    }
+    .stButton>button:hover {
+        background-color: #2563EB;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# ... [Keep is_footer_text, is_header_text, should_skip_line exactly as they are] ...
+# Define footer patterns that should never be captured as data
+FOOTER_PATTERNS = [
+    "provided by Texas Ethics Commission",
+    "www.ethics.state.tx.us",
+    "Version V1.1",
+    "Forms provided by",
+    "Texas Ethics Commission"
+]
+
+# Define header patterns that should be skipped
+HEADER_PATTERNS = [
+    "Full name of contributor",
+    "out-of-state PAC",
+    "ID#:_________________________",
+    "Amount of Contribution ($)",
+    "Date",
+    "Contributor address",
+    "Principal occupation",
+    "Job title",
+    "See Instructions",
+    "Employer",
+    "SCHEDULE",
+    "MONETARY POLITICAL CONTRIBUTIONS"
+]
+
+def is_footer_text(text):
+    """Check if text contains footer patterns"""
+    if not text:
+        return False
+    text_lower = text.lower()
+    for pattern in FOOTER_PATTERNS:
+        if pattern.lower() in text_lower:
+            return True
+    return False
+
+def is_header_text(text):
+    """Check if text contains header patterns"""
+    if not text:
+        return False
+    for pattern in HEADER_PATTERNS:
+        if pattern in text:
+            return True
+    return False
+
+def should_skip_line(text):
+    """Determine if a line should be skipped when looking for occupation/employer"""
+    if not text or text.strip() == "":
+        return True
+    if is_footer_text(text):
+        return True
+    if is_header_text(text):
+        return True
+    if re.match(r'^\d+\.\d+$', text):  # Page numbers like "1.0"
+        return True
+    if re.match(r'^Sch:.*Rpt:', text):  # "Sch: 1/5 Rpt: 4/23"
+        return True
+    if re.match(r'^\d+ of \d+$', text):  # "3 of 23"
+        return True
+    return False
 
 def get_text_from_page(page, pdf_bytes, page_num):
     """
     Try to extract text normally. If empty, perform OCR.
     """
     # 1. Try native extraction (fast, accurate for digital PDFs)
-    text = page.extract_text()
+    try:
+        text = page.extract_text()
+    except:
+        text = ""
     
     # 2. If text is found and looks substantial, return it
     if text and len(text.strip()) > 50:
         return text
 
     # 3. Fallback: OCR (Scanned PDF)
+    # Note: This requires Tesseract and Poppler installed on the system
     try:
         # Convert specific page to image (page_num is 0-indexed, pdf2image uses 1-indexed)
         images = convert_from_bytes(
             pdf_bytes, 
             first_page=page_num+1, 
             last_page=page_num+1,
-            dpi=300 # High DPI helps with accuracy
+            dpi=300
         )
         
         if images:
             # Use Tesseract to get text
-            # layout preserver works better for tables usually
+            # --psm 6 assumes a single uniform block of text
             ocr_text = pytesseract.image_to_string(images[0], config='--psm 6') 
             return ocr_text
     except Exception as e:
+        # If OCR fails (usually missing dependencies), return empty string so the loop continues
         print(f"OCR Failed for page {page_num}: {e}")
         return ""
     
@@ -52,19 +160,20 @@ def extract_schedule_a1_from_pdf(pdf_file):
     all_contributions = []
     
     try:
-        # Read file bytes once to usage in both pdfplumber and pdf2image
+        # Get raw bytes for OCR usage
         pdf_bytes = pdf_file.getvalue()
         
+        # Open PDF with pdfplumber using BytesIO
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             total_pages = len(pdf.pages)
             
-            # Create a progress bar since OCR is slow
+            # Progress bar setup
             progress_bar = st.progress(0)
             status_text = st.empty()
             
             for page_num in range(total_pages):
                 # Update progress
-                status_text.text(f"Scanning page {page_num + 1} of {total_pages}...")
+                status_text.text(f"Processing page {page_num + 1} of {total_pages}...")
                 progress_bar.progress((page_num + 1) / total_pages)
                 
                 page = pdf.pages[page_num]
@@ -72,31 +181,30 @@ def extract_schedule_a1_from_pdf(pdf_file):
                 # Intelligent Extraction (Native or OCR)
                 text = get_text_from_page(page, pdf_bytes, page_num)
                 
-                # Clean text to ensure regex works on OCR'd text
-                # OCR often confuses | for I or 1, and inserts random newlines
                 if not text:
                     continue
 
                 # Check if this page is relevant
                 if "MONETARY POLITICAL CONTRIBUTIONS" in text or "Schedule A1" in text:
                     
-                    # Process lines similar to before
+                    # Split into lines and clean
                     lines = [line.strip() for line in text.split('\n') if line.strip()]
                     
                     i = 0
                     while i < len(lines):
                         line = lines[i]
                         
-                        # Regex modified slightly to be more lenient for OCR errors
-                        # e.g., allow spaces in amount, maybe allow missing $
+                        # Regex to find the start of a contribution
+                        # Looks for Date, Name, and Amount on one line
+                        # Modified to make $ optional (\$) for OCR robustness
                         date_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(.+?)\s+\$?([\d,]+\.\d{2})', line)
                         
                         if date_match:
                             date = date_match.group(1)
                             name_and_maybe_more = date_match.group(2)
-                            amount = f"${date_match.group(3)}" # standardized format
+                            amount = f"${date_match.group(3)}" # standardize currency
                             
-                            # Extract just the name
+                            # Clean name
                             name = name_and_maybe_more
                             name = re.sub(r'\(ID#:.*?\)', '', name).strip()
                             
@@ -130,7 +238,7 @@ def extract_schedule_a1_from_pdf(pdf_file):
                             # Find occupation and employer
                             search_end = min(i + 15, len(lines))
                             
-                            # Look for next contribution to know where to stop
+                            # Look for next contribution to know where to stop searching for occupation
                             next_contribution_idx = -1
                             for j in range(i + 1, min(i + 20, len(lines))):
                                 if re.search(r'\d{2}/\d{2}/\d{4}\s+.*?\d+\.\d{2}', lines[j]):
@@ -138,16 +246,20 @@ def extract_schedule_a1_from_pdf(pdf_file):
                                     search_end = min(search_end, next_contribution_idx)
                                     break
                             
+                            # Gather potential occupation/employer lines
                             potential_data_lines = []
                             for j in range(i + 1, search_end):
                                 test_line = lines[j]
                                 
+                                # Use helper to skip headers, footers, address lines
                                 if should_skip_line(test_line):
                                     continue
                                 if test_line == address:
                                     continue
+                                # Skip lines that look like dates/amounts (artifacts)
                                 if re.search(r'\d{2}/\d{2}/\d{4}', test_line) and re.search(r'\d+\.\d{2}', test_line):
                                     continue
+                                # Skip lines that look like addresses
                                 if ',' in test_line and re.search(r'[A-Z]{2}\s+\d', test_line):
                                     continue
                                 
@@ -168,13 +280,15 @@ def extract_schedule_a1_from_pdf(pdf_file):
                                     occupation = potential_data_lines[0]
                                     employer = potential_data_lines[1]
                             
-                            # Final cleanup
+                            # Final cleanup of captured text
                             for pattern in HEADER_PATTERNS:
                                 if occupation: occupation = occupation.replace(pattern, "").strip()
                                 if employer: employer = employer.replace(pattern, "").strip()
                             
                             if occupation in ["()", "(", ")", "No Data"]: occupation = "No Data"
                             if employer in ["()", "(", ")", "No Data"]: employer = "No Data"
+                            if not occupation: occupation = "No Data"
+                            if not employer: employer = "No Data"
                             
                             all_contributions.append({
                                 'Date': date,
@@ -189,12 +303,14 @@ def extract_schedule_a1_from_pdf(pdf_file):
                                 'Page': page_num + 1
                             })
                             
-                            # Skip ahead
-                            skip_amount = 1 # Fallback
+                            # Skip ahead in loop
+                            skip_amount = 1 
+                            # Try to find the next date line to skip accurately
                             for j in range(i + 1, min(i + 10, len(lines))):
                                 if re.search(r'\d{2}/\d{2}/\d{4}\s+.*?\d+\.\d{2}', lines[j]):
                                     skip_amount = j - i
                                     break
+                            
                             if skip_amount > 1:
                                 i += skip_amount
                             else:
@@ -206,7 +322,7 @@ def extract_schedule_a1_from_pdf(pdf_file):
             status_text.empty()
             progress_bar.empty()
 
-        # Deduplication logic
+        # Remove duplicates
         unique_contributions = []
         seen = set()
         for contrib in all_contributions:
@@ -222,13 +338,13 @@ def extract_schedule_a1_from_pdf(pdf_file):
 
 def main():
     # Header
-    st.markdown('<h1 class="main-header">📄 Texas Ethics Commission PDF Extractor</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📄 Texas Ethics PDF Extractor</h1>', unsafe_allow_html=True)
     
     # Description
     st.markdown("""
     <div class="info-box">
     <strong>ℹ️ About this tool:</strong> This application extracts Schedule A1 (Monetary Political Contributions) 
-    data from Texas Ethics Commission PDF files and exports it to Excel format.
+    data from Texas Ethics Commission PDF files (Digital and Scanned/OCR) and exports it to Excel.
     </div>
     """, unsafe_allow_html=True)
     
@@ -247,12 +363,13 @@ def main():
         
         # Process button
         if st.button("🚀 Extract Data", type="primary"):
-            with st.spinner("Processing PDF... This may take a few seconds."):
+            with st.spinner("Processing PDF... This may take a while if OCR is needed."):
                 # Extract data
                 contributions, error = extract_schedule_a1_from_pdf(uploaded_file)
                 
                 if error:
                     st.error(f"❌ {error}")
+                    st.warning("Ensure Poppler and Tesseract-OCR are installed on the system.")
                 elif not contributions:
                     st.warning("⚠️ No Schedule A1 data found in the uploaded PDF.")
                 else:
@@ -291,7 +408,10 @@ def main():
                     with col2:
                         st.metric("Total Amount", f"${total:,.2f}")
                     with col3:
-                        date_range = f"{df['Date'].min().strftime('%m/%d/%Y')} to {df['Date'].max().strftime('%m/%d/%Y')}"
+                        if not df.empty and df['Date'].notnull().any():
+                            date_range = f"{df['Date'].min().strftime('%m/%d/%Y')} to {df['Date'].max().strftime('%m/%d/%Y')}"
+                        else:
+                            date_range = "N/A"
                         st.metric("Date Range", date_range)
                     
                     # Prepare Excel file for download
@@ -325,32 +445,17 @@ def main():
     with st.sidebar:
         st.markdown("## 📖 Instructions")
         st.markdown("""
-        1. **Upload** a Texas Ethics Commission PDF file
+        1. **Upload** a Texas Ethics Commission PDF
         2. **Click** the 'Extract Data' button
         3. **Preview** the extracted data
         4. **Download** as Excel or CSV
         
         ---
+        **ℹ️ Scanned PDF Support:**
+        If the PDF is an image (scanned), the app will use OCR. 
+        This is slower than standard extraction.
         
-        **📊 Extracted Fields:**
-        - Date
-        - Contributor Name
-        - Address (with City, State, ZIP)
-        - Occupation
-        - Employer
-        - Amount
-        
-        ---
-        
-        **✅ Supported Format:**
-        Texas Ethics Commission Schedule A1
-        (Monetary Political Contributions)
-        
-        ---
-        
-        **⚠️ Note:**
-        Only extracts data from pages containing
-        "MONETARY POLITICAL CONTRIBUTIONS"
+        **Note:** Requires Tesseract and Poppler installed on the host machine.
         """)
         
         # Add a reset button
