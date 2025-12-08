@@ -4,270 +4,209 @@ import pandas as pd
 import re
 import io
 from datetime import datetime
+# NEW IMPORTS
+import pytesseract
+from pdf2image import convert_from_bytes
+from PIL import Image
 
-# Set page configuration
-st.set_page_config(
-    page_title="Texas Ethics PDF Extractor",
-    page_icon="📄",
-    layout="wide"
-)
+# ... [Keep your set_page_config and CSS styles exactly as they are] ...
 
-# Custom CSS for better styling
-st.markdown("""
-    <style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1E3A8A;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .sub-header {
-        font-size: 1.5rem;
-        color: #374151;
-        margin-bottom: 1rem;
-    }
-    .success-box {
-        background-color: #D1FAE5;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 5px solid #10B981;
-        margin: 1rem 0;
-    }
-    .info-box {
-        background-color: #DBEAFE;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 5px solid #3B82F6;
-        margin: 1rem 0;
-        color: black;
-    }
-    .stButton>button {
-        background-color: #3B82F6;
-        color: white;
-        font-weight: bold;
-        border: none;
-        padding: 0.5rem 2rem;
-        border-radius: 0.5rem;
-    }
-    .stButton>button:hover {
-        background-color: #2563EB;
-    }
-    </style>
-""", unsafe_allow_html=True)
+# ... [Keep your FOOTER_PATTERNS and HEADER_PATTERNS exactly as they are] ...
 
-# Define footer patterns that should never be captured as data
-FOOTER_PATTERNS = [
-    "provided by Texas Ethics Commission",
-    "www.ethics.state.tx.us",
-    "Version V1.1",
-    "Forms provided by",
-    "Texas Ethics Commission"
-]
+# ... [Keep is_footer_text, is_header_text, should_skip_line exactly as they are] ...
 
-# Define header patterns that should be skipped
-HEADER_PATTERNS = [
-    "Full name of contributor",
-    "out-of-state PAC",
-    "ID#:_________________________",
-    "Amount of Contribution ($)",
-    "Date",
-    "Contributor address",
-    "Principal occupation",
-    "Job title",
-    "See Instructions",
-    "Employer",
-    "SCHEDULE",
-    "MONETARY POLITICAL CONTRIBUTIONS"
-]
+def get_text_from_page(page, pdf_bytes, page_num):
+    """
+    Try to extract text normally. If empty, perform OCR.
+    """
+    # 1. Try native extraction (fast, accurate for digital PDFs)
+    text = page.extract_text()
+    
+    # 2. If text is found and looks substantial, return it
+    if text and len(text.strip()) > 50:
+        return text
 
-def is_footer_text(text):
-    """Check if text contains footer patterns"""
-    if not text:
-        return False
-    text_lower = text.lower()
-    for pattern in FOOTER_PATTERNS:
-        if pattern.lower() in text_lower:
-            return True
-    return False
-
-def is_header_text(text):
-    """Check if text contains header patterns"""
-    if not text:
-        return False
-    for pattern in HEADER_PATTERNS:
-        if pattern in text:
-            return True
-    return False
-
-def should_skip_line(text):
-    """Determine if a line should be skipped when looking for occupation/employer"""
-    if not text or text.strip() == "":
-        return True
-    if is_footer_text(text):
-        return True
-    if is_header_text(text):
-        return True
-    if re.match(r'^\d+\.\d+$', text):  # Page numbers like "1.0"
-        return True
-    if re.match(r'^Sch:.*Rpt:', text):  # "Sch: 1/5 Rpt: 4/23"
-        return True
-    if re.match(r'^\d+ of \d+$', text):  # "3 of 23"
-        return True
-    return False
+    # 3. Fallback: OCR (Scanned PDF)
+    try:
+        # Convert specific page to image (page_num is 0-indexed, pdf2image uses 1-indexed)
+        images = convert_from_bytes(
+            pdf_bytes, 
+            first_page=page_num+1, 
+            last_page=page_num+1,
+            dpi=300 # High DPI helps with accuracy
+        )
+        
+        if images:
+            # Use Tesseract to get text
+            # layout preserver works better for tables usually
+            ocr_text = pytesseract.image_to_string(images[0], config='--psm 6') 
+            return ocr_text
+    except Exception as e:
+        print(f"OCR Failed for page {page_num}: {e}")
+        return ""
+    
+    return ""
 
 def extract_schedule_a1_from_pdf(pdf_file):
-    """Extract Schedule A1 data from uploaded PDF"""
+    """Extract Schedule A1 data from uploaded PDF (Digital or Scanned)"""
     all_contributions = []
     
     try:
-        with pdfplumber.open(pdf_file) as pdf:
-            # Find Schedule A1 pages
-            schedule_a1_pages = []
-            for page_num in range(len(pdf.pages)):
-                page = pdf.pages[page_num]
-                text = page.extract_text()
-                if text and "MONETARY POLITICAL CONTRIBUTIONS" in text:
-                    schedule_a1_pages.append(page_num)
-            
-            if not schedule_a1_pages:
-                return None, "No Schedule A1 data found in the PDF"
-            
-            # Process each Schedule A1 page
-            for page_num in schedule_a1_pages:
-                page = pdf.pages[page_num]
-                text = page.extract_text()
-                
-                # Split into lines and clean
-                lines = [line.strip() for line in text.split('\n') if line.strip()]
-                
-                # Process each contribution
-                i = 0
-                while i < len(lines):
-                    line = lines[i]
-                    
-                    # Check if this line has the pattern: date, name, amount
-                    date_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(.+?)\s+\$([\d,]+\.\d{2})', line)
-                    
-                    if date_match:
-                        date = date_match.group(1)
-                        name_and_maybe_more = date_match.group(2)
-                        amount = f"${date_match.group(3)}"
-                        
-                        # Extract just the name
-                        name = name_and_maybe_more
-                        name = re.sub(r'\(ID#:.*?\)', '', name).strip()
-                        
-                        # Initialize variables
-                        address = "No Data"
-                        city = "No Data"
-                        state = "No Data"
-                        zipcode = "No Data"
-                        occupation = "No Data"
-                        employer = "No Data"
-                        
-                        # Look for address in next 3 lines
-                        for j in range(1, 4):
-                            if i + j < len(lines):
-                                test_line = lines[i + j]
-                                # Check for address pattern (City, ST ZIP)
-                                if ',' in test_line and re.search(r'[A-Z]{2}\s+\d', test_line):
-                                    address = test_line
-                                    
-                                    # Parse address
-                                    addr_parts = address.split(',')
-                                    if len(addr_parts) >= 2:
-                                        city = addr_parts[0].strip()
-                                        state_zip = addr_parts[1].strip()
-                                        sz_parts = state_zip.split()
-                                        if len(sz_parts) >= 2:
-                                            state = sz_parts[0]
-                                            zipcode = sz_parts[1]
-                                    break
-                        
-                        # Find occupation and employer
-                        search_end = min(i + 15, len(lines))
-                        
-                        # Look for next contribution to know where to stop
-                        next_contribution_idx = -1
-                        for j in range(i + 1, min(i + 20, len(lines))):
-                            if re.search(r'\d{2}/\d{2}/\d{4}\s+.*?\$[\d,]+\.\d{2}', lines[j]):
-                                next_contribution_idx = j
-                                search_end = min(search_end, next_contribution_idx)
-                                break
-                        
-                        # Search for occupation/employer
-                        potential_data_lines = []
-                        for j in range(i + 1, search_end):
-                            test_line = lines[j]
-                            
-                            if should_skip_line(test_line):
-                                continue
-                            if test_line == address:
-                                continue
-                            if re.search(r'\d{2}/\d{2}/\d{4}', test_line) and '$' in test_line:
-                                continue
-                            if ',' in test_line and re.search(r'[A-Z]{2}\s+\d', test_line):
-                                continue
-                            
-                            potential_data_lines.append(test_line)
-                        
-                        # Process potential data lines
-                        if potential_data_lines:
-                            if len(potential_data_lines) == 1:
-                                data_line = potential_data_lines[0]
-                                if ' ' in data_line:
-                                    parts = data_line.split(maxsplit=1)
-                                    if len(parts) == 2:
-                                        occupation = parts[0]
-                                        employer = parts[1]
-                                else:
-                                    occupation = data_line
-                            elif len(potential_data_lines) >= 2:
-                                occupation = potential_data_lines[0]
-                                employer = potential_data_lines[1]
-                        
-                        # Final cleanup
-                        for pattern in HEADER_PATTERNS:
-                            if occupation:
-                                occupation = occupation.replace(pattern, "").strip()
-                            if employer:
-                                employer = employer.replace(pattern, "").strip()
-                        
-                        if occupation and occupation in ["()", "(", ")"]:
-                            occupation = "No Data"
-                        if employer and employer in ["()", "(", ")"]:
-                            employer = "No Data"
-                        
-                        if not occupation or not occupation.strip():
-                            occupation = "No Data"
-                        if not employer or not employer.strip():
-                            employer = "No Data"
-                        
-                        all_contributions.append({
-                            'Date': date,
-                            'Contributor Name': name,
-                            'Address': address,
-                            'City': city,
-                            'State': state,
-                            'Zip': zipcode,
-                            'Occupation': occupation,
-                            'Employer': employer,
-                            'Amount': amount,
-                            'Page': page_num + 1
-                        })
-                        
-                        # Skip ahead
-                        skip_amount = 5
-                        for j in range(i + 1, min(i + 10, len(lines))):
-                            if re.search(r'\d{2}/\d{2}/\d{4}\s+.*?\$[\d,]+\.\d{2}', lines[j]):
-                                skip_amount = j - i
-                                break
-                        
-                        i += skip_amount
-                    else:
-                        i += 1
+        # Read file bytes once to usage in both pdfplumber and pdf2image
+        pdf_bytes = pdf_file.getvalue()
         
-        # Remove duplicates
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            total_pages = len(pdf.pages)
+            
+            # Create a progress bar since OCR is slow
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for page_num in range(total_pages):
+                # Update progress
+                status_text.text(f"Scanning page {page_num + 1} of {total_pages}...")
+                progress_bar.progress((page_num + 1) / total_pages)
+                
+                page = pdf.pages[page_num]
+                
+                # Intelligent Extraction (Native or OCR)
+                text = get_text_from_page(page, pdf_bytes, page_num)
+                
+                # Clean text to ensure regex works on OCR'd text
+                # OCR often confuses | for I or 1, and inserts random newlines
+                if not text:
+                    continue
+
+                # Check if this page is relevant
+                if "MONETARY POLITICAL CONTRIBUTIONS" in text or "Schedule A1" in text:
+                    
+                    # Process lines similar to before
+                    lines = [line.strip() for line in text.split('\n') if line.strip()]
+                    
+                    i = 0
+                    while i < len(lines):
+                        line = lines[i]
+                        
+                        # Regex modified slightly to be more lenient for OCR errors
+                        # e.g., allow spaces in amount, maybe allow missing $
+                        date_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(.+?)\s+\$?([\d,]+\.\d{2})', line)
+                        
+                        if date_match:
+                            date = date_match.group(1)
+                            name_and_maybe_more = date_match.group(2)
+                            amount = f"${date_match.group(3)}" # standardized format
+                            
+                            # Extract just the name
+                            name = name_and_maybe_more
+                            name = re.sub(r'\(ID#:.*?\)', '', name).strip()
+                            
+                            # Initialize variables
+                            address = "No Data"
+                            city = "No Data"
+                            state = "No Data"
+                            zipcode = "No Data"
+                            occupation = "No Data"
+                            employer = "No Data"
+                            
+                            # Look for address in next 3 lines
+                            for j in range(1, 4):
+                                if i + j < len(lines):
+                                    test_line = lines[i + j]
+                                    # Check for address pattern (City, ST ZIP)
+                                    if ',' in test_line and re.search(r'[A-Z]{2}\s+\d', test_line):
+                                        address = test_line
+                                        
+                                        # Parse address
+                                        addr_parts = address.split(',')
+                                        if len(addr_parts) >= 2:
+                                            city = addr_parts[0].strip()
+                                            state_zip = addr_parts[1].strip()
+                                            sz_parts = state_zip.split()
+                                            if len(sz_parts) >= 2:
+                                                state = sz_parts[0]
+                                                zipcode = sz_parts[1]
+                                        break
+                            
+                            # Find occupation and employer
+                            search_end = min(i + 15, len(lines))
+                            
+                            # Look for next contribution to know where to stop
+                            next_contribution_idx = -1
+                            for j in range(i + 1, min(i + 20, len(lines))):
+                                if re.search(r'\d{2}/\d{2}/\d{4}\s+.*?\d+\.\d{2}', lines[j]):
+                                    next_contribution_idx = j
+                                    search_end = min(search_end, next_contribution_idx)
+                                    break
+                            
+                            potential_data_lines = []
+                            for j in range(i + 1, search_end):
+                                test_line = lines[j]
+                                
+                                if should_skip_line(test_line):
+                                    continue
+                                if test_line == address:
+                                    continue
+                                if re.search(r'\d{2}/\d{2}/\d{4}', test_line) and re.search(r'\d+\.\d{2}', test_line):
+                                    continue
+                                if ',' in test_line and re.search(r'[A-Z]{2}\s+\d', test_line):
+                                    continue
+                                
+                                potential_data_lines.append(test_line)
+                            
+                            # Logic to assign occupation/employer from found lines
+                            if potential_data_lines:
+                                if len(potential_data_lines) == 1:
+                                    data_line = potential_data_lines[0]
+                                    if ' ' in data_line:
+                                        parts = data_line.split(maxsplit=1)
+                                        if len(parts) == 2:
+                                            occupation = parts[0]
+                                            employer = parts[1]
+                                    else:
+                                        occupation = data_line
+                                elif len(potential_data_lines) >= 2:
+                                    occupation = potential_data_lines[0]
+                                    employer = potential_data_lines[1]
+                            
+                            # Final cleanup
+                            for pattern in HEADER_PATTERNS:
+                                if occupation: occupation = occupation.replace(pattern, "").strip()
+                                if employer: employer = employer.replace(pattern, "").strip()
+                            
+                            if occupation in ["()", "(", ")", "No Data"]: occupation = "No Data"
+                            if employer in ["()", "(", ")", "No Data"]: employer = "No Data"
+                            
+                            all_contributions.append({
+                                'Date': date,
+                                'Contributor Name': name,
+                                'Address': address,
+                                'City': city,
+                                'State': state,
+                                'Zip': zipcode,
+                                'Occupation': occupation,
+                                'Employer': employer,
+                                'Amount': amount,
+                                'Page': page_num + 1
+                            })
+                            
+                            # Skip ahead
+                            skip_amount = 1 # Fallback
+                            for j in range(i + 1, min(i + 10, len(lines))):
+                                if re.search(r'\d{2}/\d{2}/\d{4}\s+.*?\d+\.\d{2}', lines[j]):
+                                    skip_amount = j - i
+                                    break
+                            if skip_amount > 1:
+                                i += skip_amount
+                            else:
+                                i += 1
+                        else:
+                            i += 1
+            
+            # Clear progress bar
+            status_text.empty()
+            progress_bar.empty()
+
+        # Deduplication logic
         unique_contributions = []
         seen = set()
         for contrib in all_contributions:
