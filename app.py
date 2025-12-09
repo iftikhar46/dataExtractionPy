@@ -116,6 +116,16 @@ def should_skip_line(text):
         return True
     if re.match(r'^\d+ of \d+$', text):  # "3 of 23"
         return True
+    
+    # Additional checks for address-like patterns
+    # Check for street address patterns
+    if re.match(r'^\d+\s+[A-Za-z]', text):  # "123 Main St" or similar
+        return True
+    if re.match(r'^[A-Za-z\s]+,\s*[A-Z]{2}$', text):  # "City, ST" without zip
+        return True
+    if re.match(r'^[A-Z]{2}\s+\d{5}', text):  # "TX 77027" or similar
+        return True
+    
     return False
 
 def get_text_from_page(page, pdf_bytes, page_num):
@@ -216,49 +226,100 @@ def extract_schedule_a1_from_pdf(pdf_file):
                             occupation = "No Data"
                             employer = "No Data"
                             
-                            # Look for address in next 3 lines
-                            for j in range(1, 4):
-                                if i + j < len(lines):
-                                    test_line = lines[i + j]
-                                    # Check for address pattern (City, ST ZIP)
-                                    if ',' in test_line and re.search(r'[A-Z]{2}\s+\d', test_line):
-                                        address = test_line
-                                        
-                                        # Parse address
-                                        addr_parts = address.split(',')
-                                        if len(addr_parts) >= 2:
-                                            city = addr_parts[0].strip()
-                                            state_zip = addr_parts[1].strip()
-                                            sz_parts = state_zip.split()
-                                            if len(sz_parts) >= 2:
-                                                state = sz_parts[0]
-                                                zipcode = sz_parts[1]
-                                        break
+                            # MODIFIED: Look for address in next 5 lines, handling multi-line addresses
+                            address_lines = []
+                            max_address_lines = 5  # Maximum lines to check for address
                             
-                            # Find occupation and employer
+                            for j in range(1, max_address_lines + 1):
+                                if i + j >= len(lines):
+                                    break
+                                    
+                                test_line = lines[i + j]
+                                
+                                # Skip empty lines
+                                if not test_line.strip():
+                                    if address_lines:  # If we already have address lines, stop
+                                        break
+                                    else:
+                                        continue
+                                
+                                # Check for address patterns
+                                is_address_line = False
+                                
+                                # Pattern 1: Complete address with city, state, zip
+                                if ',' in test_line and re.search(r'[A-Z]{2}\s+\d', test_line):
+                                    is_address_line = True
+                                
+                                # Pattern 2: Street address (starts with number)
+                                elif re.match(r'^\d+\s+[A-Za-z]', test_line):
+                                    is_address_line = True
+                                
+                                # Pattern 3: City, State (without zip)
+                                elif re.match(r'^[A-Za-z\s]+,\s*[A-Z]{2}$', test_line):
+                                    is_address_line = True
+                                
+                                # Pattern 4: Just state and zip
+                                elif re.match(r'^[A-Z]{2}\s+\d{5}', test_line):
+                                    is_address_line = True
+                                
+                                if is_address_line:
+                                    address_lines.append(test_line)
+                                elif address_lines:
+                                    # If we already started collecting address lines and this doesn't look like address, stop
+                                    break
+                            
+                            # Combine address lines
+                            if address_lines:
+                                address = " ".join(address_lines).strip()
+                                
+                                # Try to parse the complete address
+                                # Look for city, state, zip pattern in the combined address
+                                addr_match = re.search(r'([A-Za-z\s]+),\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)', address)
+                                if addr_match:
+                                    city = addr_match.group(1).strip()
+                                    state = addr_match.group(2).strip()
+                                    zipcode = addr_match.group(3).strip()
+                                else:
+                                    # If no match, try to extract what we can
+                                    addr_parts = address.split(',')
+                                    if len(addr_parts) >= 2:
+                                        city = addr_parts[0].strip()
+                                        state_zip = addr_parts[1].strip()
+                                        sz_parts = state_zip.split()
+                                        if len(sz_parts) >= 2:
+                                            state = sz_parts[0]
+                                            zipcode = sz_parts[1]
+                            
+                            # MODIFIED: Skip address lines when searching for occupation/employer
+                            address_line_count = len(address_lines)
+                            search_start = i + address_line_count + 1
                             search_end = min(i + 15, len(lines))
                             
-                            # Look for next contribution to know where to stop searching for occupation
+                            # Look for next contribution to know where to stop
                             next_contribution_idx = -1
-                            for j in range(i + 1, min(i + 20, len(lines))):
+                            for j in range(search_start, min(i + 20, len(lines))):
                                 if re.search(r'\d{2}/\d{2}/\d{4}\s+.*?\d+\.\d{2}', lines[j]):
                                     next_contribution_idx = j
                                     search_end = min(search_end, next_contribution_idx)
                                     break
                             
-                            # Gather potential occupation/employer lines
+                            # Gather potential occupation/employer lines (skip address lines)
                             potential_data_lines = []
-                            for j in range(i + 1, search_end):
+                            for j in range(search_start, search_end):
                                 test_line = lines[j]
                                 
-                                # Use helper to skip headers, footers, address lines
+                                # Use helper to skip headers, footers
                                 if should_skip_line(test_line):
                                     continue
-                                if test_line == address:
+                                
+                                # Skip if this line was part of address
+                                if address_lines and test_line in address_lines:
                                     continue
-                                # Skip lines that look like dates/amounts (artifacts)
+                                
+                                # Skip lines that look like dates/amounts
                                 if re.search(r'\d{2}/\d{2}/\d{4}', test_line) and re.search(r'\d+\.\d{2}', test_line):
                                     continue
+                                
                                 # Skip lines that look like addresses
                                 if ',' in test_line and re.search(r'[A-Z]{2}\s+\d', test_line):
                                     continue
@@ -280,15 +341,21 @@ def extract_schedule_a1_from_pdf(pdf_file):
                                     occupation = potential_data_lines[0]
                                     employer = potential_data_lines[1]
                             
-                            # Final cleanup of captured text
+                            # Final cleanup
                             for pattern in HEADER_PATTERNS:
-                                if occupation: occupation = occupation.replace(pattern, "").strip()
-                                if employer: employer = employer.replace(pattern, "").strip()
+                                if occupation: 
+                                    occupation = occupation.replace(pattern, "").strip()
+                                if employer: 
+                                    employer = employer.replace(pattern, "").strip()
                             
-                            if occupation in ["()", "(", ")", "No Data"]: occupation = "No Data"
-                            if employer in ["()", "(", ")", "No Data"]: employer = "No Data"
-                            if not occupation: occupation = "No Data"
-                            if not employer: employer = "No Data"
+                            if occupation in ["()", "(", ")", "No Data"]: 
+                                occupation = "No Data"
+                            if employer in ["()", "(", ")", "No Data"]: 
+                                employer = "No Data"
+                            if not occupation: 
+                                occupation = "No Data"
+                            if not employer: 
+                                employer = "No Data"
                             
                             all_contributions.append({
                                 'Date': date,
@@ -303,18 +370,16 @@ def extract_schedule_a1_from_pdf(pdf_file):
                                 'Page': page_num + 1
                             })
                             
-                            # Skip ahead in loop
-                            skip_amount = 1 
+                            # Skip ahead - include address lines in skip count
+                            skip_amount = max(1, address_line_count + 1)
+                            
                             # Try to find the next date line to skip accurately
-                            for j in range(i + 1, min(i + 10, len(lines))):
+                            for j in range(i + skip_amount, min(i + 10, len(lines))):
                                 if re.search(r'\d{2}/\d{2}/\d{4}\s+.*?\d+\.\d{2}', lines[j]):
                                     skip_amount = j - i
                                     break
                             
-                            if skip_amount > 1:
-                                i += skip_amount
-                            else:
-                                i += 1
+                            i += skip_amount
                         else:
                             i += 1
             
