@@ -360,13 +360,13 @@ def extract_schedule_a1_from_pdf(pdf_file):
                             all_contributions.append({
                                 'Date': date,
                                 'Contributor Name': name,
-                                'Address': address,
+                                'Amount': amount,
+                                # 'Address': address,
                                 'City': city,
                                 'State': state,
                                 'Zip': zipcode,
                                 'Occupation': occupation,
                                 'Employer': employer,
-                                'Amount': amount,
                                 'Page': page_num + 1
                             })
                             
