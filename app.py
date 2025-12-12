@@ -360,11 +360,11 @@ def extract_schedule_a1_from_pdf(pdf_file):
                             all_contributions.append({
                                 'Date': date,
                                 'Contributor Name': name,
-                                'Amount': amount,
                                 # 'Address': address,
                                 'City': city,
                                 'State': state,
                                 'Zip': zipcode,
+                                'Amount': amount,
                                 'Occupation': occupation,
                                 'Employer': employer,
                                 'Page': page_num + 1
@@ -524,8 +524,8 @@ def main():
         """)
         
         # Add a reset button
-        if st.button("🔄 Clear & Upload New"):
-            st.rerun()
+        # if st.button("🔄 Clear & Upload New"):
+        #     st.rerun()
 
 if __name__ == "__main__":
     main()
